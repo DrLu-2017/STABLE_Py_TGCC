@@ -1,0 +1,24 @@
+questions:
+  - id: OQ001
+    module: shared
+    question: Where is the canonical longitudinal phase-like observable computed?
+    status: open
+    priority: high
+
+  - id: OQ002
+    module: phase-loop-mode0
+    question: What is the cleanest actuator target for the first controller patch?
+    status: open
+    priority: high
+
+  - id: OQ003
+    module: dllrf
+    question: Which controller states should be explicit in the first DLLRF model?
+    status: open
+    priority: medium
+
+  - id: OQ004
+    module: rf-phase-noise
+    question: Should the first noise implementation use a white-noise or shaped-spectrum model?
+    status: open
+    priority: medium

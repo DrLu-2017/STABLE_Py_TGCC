@@ -1,0 +1,5 @@
+numpy>=1.24.0
+scipy>=1.10.0
+# Optional GPU acceleration backends on TGCC Irene A100 nodes (either CuPy or PyTorch CUDA):
+# cupy-cuda12x>=12.0.0
+# torch>=2.0.0

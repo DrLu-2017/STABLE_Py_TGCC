@@ -1,0 +1,31 @@
+artifact: longitudinal-rf-control-dllrf
+status: draft
+owner: TBD
+last_updated: 2026-07-01
+
+decisions:
+  - id: D001
+    title: Explicit DLLRF model belongs in `mbtrack2/tracking/rf.py`
+    status: accepted
+    rationale: |
+      The DLLRF path is naturally coupled to `CavityResonator` feedback and should share the existing RF feedback list and track execution model.
+    consequences:
+      - `DLLRFFeedback` is implemented as a feedback object appended to `cav_res.feedback`.
+      - `CavityResonator.track(beam)` automatically triggers the DLLRF update.
+
+  - id: D002
+    title: Model DLLRF as ADC/IF/DDC/FIFO + I/Q PI control
+    status: accepted
+    rationale: |
+      This representation makes the digital control chain explicit and supports later extensions for phase noise and realistic timing effects.
+    consequences:
+      - The class exposes `f_adc`, `f_if`, `total_delay_s`, `lp_taps`, `kp`, and `ki`.
+      - Internal state includes FIFO delay buffer, NCO phase, lowpass filter state, and integrators.
+
+open_questions:
+  - id: Q001
+    question: Should `DLLRFFeedback` be refactored into its own module file instead of remaining in `rf.py`?
+    impact: high
+  - id: Q002
+    question: Is the current FIFO-delay and fixed `f_adc` representation sufficient for RF phase-noise studies?
+    impact: medium

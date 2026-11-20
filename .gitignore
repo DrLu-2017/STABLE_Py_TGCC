@@ -1,0 +1,19 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.asv
+
+# Sensitive user credentials & local SQLite vault
+STABLE_Py_TGCC/data/
+*.db
+*.sqlite
+
+# Large simulation output folders & large .mat data (>50 MB)
+scan_data/
+SOLEIL_I0*.mat
+2311.13205.tar.gz
+jobs/
+*.jsonl
+*.log
+.DS_Store
+Thumbs.db

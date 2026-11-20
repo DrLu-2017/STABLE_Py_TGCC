@@ -1,0 +1,70 @@
+artifact: longitudinal-rf-control-mbtrack2
+status: draft
+owner: Lu Zhao
+last_updated: 2026-05-20
+
+program_objective:
+  summary: >-
+    Organize and implement longitudinal RF control and perturbation features in
+    mbtrack2 using an incremental, traceable, and agent-readable structure.
+  stages:
+    - phase-loop-mode0
+    - dllrf
+    - rf-phase-noise
+
+cross_cutting_decisions:
+  - id: M001
+    title: Use one top-level artifact with submodule directories
+    status: accepted
+    rationale: >-
+      The three planned features share code paths and physical context, but they
+      have distinct purposes. A shared top-level artifact plus separate
+      submodules balances reuse and clarity.
+
+  - id: M002
+    title: Implement features incrementally in roadmap order
+    status: accepted
+    rationale: >-
+      Starting with phase loop mode 0 creates the simplest closed-loop path and
+      establishes the infrastructure needed for later DLLRF and noise work.
+
+  - id: M003
+    title: Preserve explicit measurement and actuation paths
+    status: accepted
+    rationale: >-
+      Longitudinal control features are easy to obscure if the code mixes
+      observable estimation, controller logic, and RF injection. Separation is
+      required for debugging and agent reasoning.
+
+  - id: M004
+    title: Shared infrastructure may be introduced only after first working path
+    status: accepted
+    rationale: >-
+      Premature abstraction would make the first implementation harder to review.
+      Shared utility extraction is allowed after a minimal working path exists.
+
+  - id: M005
+    title: Every stage must carry its own evidence
+    status: accepted
+    rationale: >-
+      Validation should not remain implicit in chat history or commit messages.
+      Each submodule must store benchmark outputs and comparison notes.
+
+open_questions:
+  - id: MQ001
+    question: Which repository files are the authoritative longitudinal control insertion points?
+    impact: high
+  - id: MQ002
+    question: How much of DLLRF should share infrastructure with phase loop code?
+    impact: high
+  - id: MQ003
+    question: What is the preferred RF phase noise model for the first implementation?
+    impact: medium
+  - id: MQ004
+    question: Which benchmark set is sufficient for merge acceptance across all three modules?
+    impact: high
+
+refactor_rules:
+  - Any shared refactor must cite the stage that motivated it.
+  - Any change to shared code must trigger regression checks for all affected modules.
+  - Any renamed concept must also be updated in shared-definitions.md.

@@ -1,0 +1,25 @@
+# Python caches & compiled extensions
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.dll
+*.egg-info/
+dist/
+build/
+
+# User credentials, local SQLite vault, and TGCC SSH secrets (NEVER commit!)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Simulation outputs & temporary files
+jobs/
+scan_data/
+*.mat
+*.jsonl
+*.log
+.DS_Store
+Thumbs.db

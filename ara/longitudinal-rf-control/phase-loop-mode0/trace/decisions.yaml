@@ -1,0 +1,31 @@
+artifact: longitudinal-rf-control-phase-loop-mode0
+status: draft
+owner: TBD
+last_updated: 2026-07-01
+
+decisions:
+  - id: P001
+    title: PhaseLoop is the mode-0 phase controller artifact
+    status: accepted
+    rationale: |
+      `PhaseLoop` encodes the longitudinal mode-0 feedback law and the actuation path for both ideal and beam-loaded cavities.
+    consequences:
+      - `PhaseLoop` is documented as a distinct ARA submodule.
+      - Cavity-specific correction paths are explicitly captured in the artifact.
+
+  - id: P002
+    title: Mode-0 correction uses delayed mean bunch phase
+    status: accepted
+    rationale: |
+      Causality in a turn-based simulation requires that measured phase is applied after an integer delay. The class stores a fixed-size delay buffer for this purpose.
+    consequences:
+      - The delay parameter is required to be ≥ 1.
+      - The controller supports `P`, `PD`, `PI`, and `PID` laws.
+
+open_questions:
+  - id: Q001
+    question: Should the `PhaseLoop` measure phase from a full `Beam` object for multi-bunch mode-0, or remain single-bunch focused?
+    impact: high
+  - id: Q002
+    question: Is using `ig_modulation_signal` the preferred integration path for `CavityResonator` phase correction?
+    impact: medium
