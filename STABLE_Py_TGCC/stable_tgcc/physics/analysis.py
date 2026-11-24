@@ -239,15 +239,16 @@ def classify_tracking_result(
     Par_num: int = 10000,
     has_homs: bool = True,
     fs_approx: float = 1580.0,
+    has_gap: bool = False,
 ) -> Dict[str, Any]:
     """
-    Exact Python port of MATLAB STABLE_App.m (lines 4375-4555) stability classification
-    and growth rate (`gr_si`) calculation:
+    ALBuMS-aligned (PRAB 28, 054401, 2025) longitudinal instability classifier for
+    4th-gen storage ring double-RF systems:
       0 = Stable (o)
-      1 = PTBL (x)
-      2 = Coupled D-Q (★)
+      1 = PTBL / Over-stretched (x)
+      2 = Coupled D-Q / Quadrupole (★)
       3 = LCBI (▲)
-      4 = Other / Mode-0 Robinson (◆)
+      4 = Mode-0 / Other (◆)
     """
     n_rec, n_bun = record_Q_mean.shape
     dt_sample = Recor_step * T0
@@ -290,6 +291,13 @@ def classify_tracking_result(
         mode_crest_factor = peak_mode_pwr / (float(np.mean(ac_modes)) + 1e-30)
         peak_mb_rms_ps = math.sqrt(min(total_mb_pwr, 2.0 * peak_mode_pwr)) * sigma_t0 * 1e12
         dominant_mode_mu = int(np.argmax(mode_amp_ps))
+        # Mode +/- 1 power (characteristic of gapped PTBL traveling-wave modulation)
+        mode1_pwr = float(ac_modes[0] + (ac_modes[-1] if len(ac_modes) > 1 else 0.0))
+        ptbl_mode1_dom = (
+            (n_bun > 4)
+            and (mode1_pwr > 0.35 * max(total_mb_pwr, 1e-30))
+            and (mode1_pwr > 0.50 * max(mode0_pwr, 1e-30))
+        )
     else:
         mode_amp_ps = np.array([centroid_jitter_ps])
         mode0_pwr = float(np.mean(qm_steady_ac ** 2))
@@ -297,6 +305,8 @@ def classify_tracking_result(
         mode_crest_factor = 1.0
         peak_mb_rms_ps = 0.0
         dominant_mode_mu = 0
+        mode1_pwr = 0.0
+        ptbl_mode1_dom = False
 
     # Dominant dipole oscillation frequency
     q_bary = np.mean(q_steady - np.mean(q_steady, axis=0, keepdims=True), axis=1)
@@ -307,13 +317,13 @@ def classify_tracking_result(
     else:
         dominant_freq_Hz = 0.0
 
-    # If beam lost during tracking (matching STABLE_App.m lines 4050-4090)
+    # If beam lost during tracking
     if beam_lost:
         gr_lost = min(600.0, max(250.0, 1.0 / max(n_rec * dt_sample, 1e-3)))
-        if has_homs and total_mb_pwr > mode0_pwr and dominant_mode_mu != 0:
+        if has_homs and total_mb_pwr > mode0_pwr and dominant_mode_mu not in (0, 1, n_bun - 1):
             code = 3
             label = f"LCBI (Beam Lost, mu={dominant_mode_mu})"
-        elif xi_eff >= 0.92 and I0 >= 0.365:
+        elif (has_gap and (ptbl_mode1_dom or xi_eff >= 0.90)) or (xi_eff >= 1.02 and I0 >= 0.35):
             code = 1
             label = "PTBL (Beam Lost)"
         elif xi_eff >= 0.88:
@@ -321,7 +331,7 @@ def classify_tracking_result(
             label = "Coupled D-Q (Beam Lost)"
         else:
             code = 3 if has_homs else 4
-            label = "LCBI (Beam Lost)" if code == 3 else "Other (Beam Lost)"
+            label = "LCBI (Beam Lost)" if code == 3 else "Mode-0 / Other (Beam Lost)"
         return {
             "stability_code": code,
             "status_label": label,
@@ -333,22 +343,35 @@ def classify_tracking_result(
             "centroid_jitter_ps": centroid_jitter_ps,
         }
 
-    # Global all-bunch energy envelope growth rate (STABLE_App.m lines 4424-4450)
-    P_detrend = pm_anal - np.mean(pm_anal, axis=0, keepdims=True)
-    rms_P = np.sqrt(np.mean(P_detrend ** 2, axis=1))
-    max_rms_P = float(np.max(rms_P)) if len(rms_P) > 0 else 0.0
-
+    # Exponential-growth window detection on full energy envelope (before nonlinear saturation)
     noise_floor_ps = (sigma_t0 * 1e12) / math.sqrt(max(Par_num, 100))
     noise_floor_P = 1.0 / math.sqrt(max(Par_num, 100))
 
-    pass_turns = np.arange(i_anal + 1, n_rec + 1, dtype=np.float64) * Recor_step
-    if max_rms_P > 2.5 * noise_floor_P and len(rms_P) >= 6:
-        xx = np.log(rms_P + 1e-30)
+    P_detrend_full = record_P_mean - np.mean(record_P_mean, axis=0, keepdims=True)
+    rms_P_full = np.sqrt(np.mean(P_detrend_full ** 2, axis=1))
+    max_rms_P = float(np.max(rms_P_full)) if len(rms_P_full) > 0 else 0.0
+
+    if max_rms_P > 2.5 * noise_floor_P and len(rms_P_full) >= 8:
+        i_peak = int(np.argmax(rms_P_full))
+        i_tr = min(max(0, int(0.05 * len(rms_P_full))), max(0, i_peak - 2))
+        above_noise = np.where(rms_P_full[i_tr : i_peak + 1] >= 2.2 * noise_floor_P)[0]
+        i_start = i_tr + int(above_noise[0]) if len(above_noise) > 0 else i_tr
+        below_sat = np.where(rms_P_full[i_start : i_peak + 1] >= 0.70 * max_rms_P)[0]
+        i_end = i_start + int(below_sat[0]) if len(below_sat) > 0 else i_peak
+        if (i_end - i_start) < 6:
+            i_start = i_anal
+            i_end = len(rms_P_full) - 1
+
+        seg_P = rms_P_full[i_start : i_end + 1]
+        seg_turns = np.arange(i_start + 1, i_end + 2, dtype=np.float64) * Recor_step
+        xx = np.log(seg_P + 1e-30)
         loc_max_idx = argrelextrema(xx, np.greater)[0]
-        if len(loc_max_idx) > 5:
-            slope, _ = np.polyfit(pass_turns[loc_max_idx], xx[loc_max_idx], 1)
+        if len(loc_max_idx) >= 4:
+            slope, _ = np.polyfit(seg_turns[loc_max_idx], xx[loc_max_idx], 1)
+        elif len(seg_turns) >= 4:
+            slope, _ = np.polyfit(seg_turns, xx, 1)
         else:
-            slope, _ = np.polyfit(pass_turns, xx, 1)
+            slope = -0.5 * damping_rate * T0
         gr_si = float(slope / T0)
     else:
         gr_si = -0.5 * damping_rate
@@ -360,23 +383,29 @@ def classify_tracking_result(
         or (mode_crest_factor > 4.0 and dominant_freq_Hz > 2.0 * fs_approx and peak_mb_rms_ps > max(3.0, 5.0 * noise_floor_ps))
     )
 
+    # Quadrupole breathing mode check via bunch-length time-series FFT (ALBuMS m=2 / D-Q check)
     sigma_BL = qs_anal * sigma_t0
     BL_mean_all = np.mean(sigma_BL, axis=1)
+    BL_mean_ac = BL_mean_all - np.mean(BL_mean_all)
     BL_osc_rel = float(np.std(BL_mean_all) / max(float(np.mean(BL_mean_all)), 1e-15))
-
-    Q_mean_last = np.mean(record_Q_mean[max(0, n_rec - 100):, :], axis=0)
-    std_bb = float(np.std(Q_mean_last) * sigma_t0 * 1e12)
+    if len(BL_mean_ac) >= 16:
+        quad_spec = np.abs(np.fft.rfft(BL_mean_ac))[1:]
+        quad_crest = float(np.max(quad_spec) / (np.mean(quad_spec) + 1e-30)) if len(quad_spec) > 0 else 1.0
+    else:
+        quad_crest = 1.0
+    has_quad_mode = (BL_osc_rel > 0.045) and (quad_crest > 3.5 or BL_osc_rel > 0.08)
 
     jitter_thresh_mean = max(1.5, 3.5 * noise_floor_ps)
     jitter_thresh_max = max(2.5, 5.0 * noise_floor_ps)
 
+    # Dynamic-only instability triggers (static gapped-fill phase ramp std_bb is NOT an instability!)
     is_unstable = (
         (gr_si > 0.3 * damping_rate)
         or (centroid_jitter_ps > max(3.5, jitter_thresh_mean))
         or (max_bunch_jitter_ps > jitter_thresh_max and I0 >= 0.35)
-        or (BL_osc_rel > 0.08)
-        or (std_bb > 0.8)
+        or has_quad_mode
         or has_lcbi_mode
+        or (has_gap and ptbl_mode1_dom and max_bunch_jitter_ps > max(3.0, 4.0 * noise_floor_ps))
     )
 
     code = 0
@@ -384,22 +413,26 @@ def classify_tracking_result(
         jitter_tol_island = 5.5 + 10.0 * max(0.0, (I0 - 0.35) / 0.15)
         is_flat_stable = (
             (((0.85 <= xi_eff <= 1.07) and (centroid_jitter_ps < jitter_tol_island)) or (centroid_jitter_ps < 3.2))
+            and (gr_si <= 0.6 * damping_rate)
             and (p_std_last < 1.15)
-            and (BL_osc_rel < 0.055)
+            and (not has_quad_mode)
             and (not has_lcbi_mode)
+            and (not (has_gap and ptbl_mode1_dom and centroid_jitter_ps > 4.0))
         )
         if is_flat_stable:
             code = 0
             gr_si = min(gr_si, -0.25 * damping_rate)
-        elif xi_eff >= 1.04 and (p_std_last > 1.8 or BL_osc_rel > 0.15 or centroid_jitter_ps > 30.0):
-            code = 1 if I0 >= 0.365 else 2
+        elif (has_gap and ptbl_mode1_dom and (centroid_jitter_ps > 3.5 or gr_si > 0.35 * damping_rate)) or (
+            xi_eff >= 1.04 and (p_std_last > 1.8 or BL_osc_rel > 0.15 or centroid_jitter_ps > 30.0)
+        ):
+            code = 1 if (has_gap or I0 >= 0.35 or xi_eff >= 1.04) else 2
         elif has_lcbi_mode:
             code = 3
-        elif xi_eff >= 0.88 and (BL_osc_rel > 0.05 or centroid_jitter_ps > max(3.5, 4.0 * noise_floor_ps) or gr_si > 0.35 * damping_rate):
+        elif xi_eff >= 0.85 and (has_quad_mode or centroid_jitter_ps > max(3.5, 4.0 * noise_floor_ps) or gr_si > 0.35 * damping_rate):
             code = 2
-        elif xi_eff < 0.88 and (gr_si > 0.35 * damping_rate or centroid_jitter_ps > max(5.0, 5.0 * noise_floor_ps) or p_std_last > 1.20 or BL_osc_rel > 0.08):
+        elif has_homs and is_multibunch_dom and (gr_si > 0.35 * damping_rate or centroid_jitter_ps > max(5.0, 5.0 * noise_floor_ps) or p_std_last > 1.20):
             code = 3
-        elif gr_si > 0.35 * damping_rate or centroid_jitter_ps > max(5.0, 5.0 * noise_floor_ps) or p_std_last > 1.25 or BL_osc_rel > 0.08:
+        elif gr_si > 0.35 * damping_rate or centroid_jitter_ps > max(5.0, 5.0 * noise_floor_ps) or p_std_last > 1.25 or has_quad_mode:
             code = 4
         else:
             code = 0

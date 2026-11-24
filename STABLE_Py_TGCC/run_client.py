@@ -6,6 +6,7 @@ Usage:
 
 from __future__ import annotations
 import sys
+from PySide6.QtCore import QLocale
 from PySide6.QtWidgets import QApplication, QDialog
 
 from stable_tgcc.auth.user_vault import UserVaultManager
@@ -20,6 +21,10 @@ def main() -> int:
     set_windows_app_id("SOLEIL.STABLE.PyTGCC.A100.2.0")
 
     app = QApplication(sys.argv)
+    # Force '.' decimal separator everywhere (avoid ',' on French/European Windows locales)
+    c_loc = QLocale.c()
+    c_loc.setNumberOptions(QLocale.NumberOption.OmitGroupSeparator)
+    QLocale.setDefault(c_loc)
     app.setStyle("Fusion")
     icon = get_app_icon()
     app.setWindowIcon(icon)

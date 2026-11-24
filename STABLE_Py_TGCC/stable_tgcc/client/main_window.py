@@ -15,7 +15,7 @@ import scipy.io as sio
 from scipy.interpolate import RectBivariateSpline
 from scipy.ndimage import convolve
 
-from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize
+from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize, QLocale
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -321,6 +321,9 @@ class STABLEMainWindow(QMainWindow):
 
     def _make_dspin(self, val: float, lo: float, hi: float, dec: int = 4, step: float = 1.0) -> QDoubleSpinBox:
         sp = QDoubleSpinBox()
+        c_loc = QLocale.c()
+        c_loc.setNumberOptions(QLocale.NumberOption.OmitGroupSeparator)
+        sp.setLocale(c_loc)
         sp.setDecimals(dec)
         sp.setRange(lo, hi)
         sp.setSingleStep(step)
@@ -475,6 +478,7 @@ class STABLEMainWindow(QMainWindow):
             "mbtrack2 Moderate DFB (G_dfb=0.25, PI kp=1.0, ki=1e-4)",
             "PI Only (DFB Off, kp=0.8, ki=1e-4)",
             "Open Loop (All Feedback Off)",
+            "MAX IV Mode-0 Damper + PI (g=0.20 kV/ps, DFB Off)",
         ])
         v_pre.addWidget(self.fb_preset_combo)
         h_pre_btn = QHBoxLayout()
@@ -549,6 +553,26 @@ class STABLEMainWindow(QMainWindow):
         f_dfb.addRow("Anchor I2 [mA] / Gain G2:", self._pair_widget(self.f_dfb_I2, self.f_dfb_G2))
         f_dfb.addRow("", btn_upd_nyq)
         layout.addWidget(g_dfb)
+
+        g_m0 = QGroupBox("Mode-0 Damper Feedback on Main Cavity (MAX IV Method)")
+        f_m0 = QFormLayout(g_m0)
+        self.chk_m0_enable = QCheckBox("Enable Mode-0 Damper on Main Cavity")
+        self.chk_m0_enable.setChecked(False)
+        self.chk_m0_enable.setToolTip(
+            "MAX IV longitudinal mode-0 dipole damper: removes DC phase offset and injects a 90-deg quadrature voltage modulation into the Main Cavity."
+        )
+        self.f_m0_gain = self._make_dspin(0.20, 0.0, 50.0, 3, 0.05)
+        self.f_m0_phase = self._make_dspin(0.0, -180.0, 180.0, 1, 5.0)
+        self.f_m0_delay = QSpinBox()
+        self.f_m0_delay.setRange(1, 200)
+        self.f_m0_delay.setValue(1)
+        self.f_m0_hp_alpha = self._make_dspin(0.002, 0.0001, 0.5, 4, 0.001)
+        self.f_m0_max_v = self._make_dspin(100.0, 1.0, 2000.0, 1, 10.0)
+        f_m0.addRow("", self.chk_m0_enable)
+        f_m0.addRow("Damper Gain [kV/ps] / Phase [deg]:", self._pair_widget(self.f_m0_gain, self.f_m0_phase))
+        f_m0.addRow("Delay [turns] / Max Mod [kV]:", self._pair_widget(self.f_m0_delay, self.f_m0_max_v))
+        f_m0.addRow("DC High-Pass Alpha:", self.f_m0_hp_alpha)
+        layout.addWidget(g_m0)
 
         self.left_tabs.addTab(w, "4. Feedback")
 
@@ -1002,6 +1026,12 @@ class STABLEMainWindow(QMainWindow):
             dfb_G1=self.f_dfb_G1.value(),
             dfb_I2_mA=self.f_dfb_I2.value(),
             dfb_G2=self.f_dfb_G2.value(),
+            m0_damper_enable=self.chk_m0_enable.isChecked(),
+            m0_damper_gain_kV_ps=self.f_m0_gain.value(),
+            m0_damper_phase_deg=self.f_m0_phase.value(),
+            m0_damper_delay_turns=self.f_m0_delay.value(),
+            m0_damper_hp_alpha=self.f_m0_hp_alpha.value(),
+            m0_damper_max_v_kV=self.f_m0_max_v.value(),
             homs=homs,
             hom_auto_align=self.chk_hom_align.isChecked(),
         )
@@ -1067,6 +1097,13 @@ class STABLEMainWindow(QMainWindow):
             self.f_dfb_G1.setValue(cfg.dfb_G1)
             self.f_dfb_I2.setValue(cfg.dfb_I2_mA)
             self.f_dfb_G2.setValue(cfg.dfb_G2)
+
+            self.chk_m0_enable.setChecked(cfg.m0_damper_enable)
+            self.f_m0_gain.setValue(cfg.m0_damper_gain_kV_ps)
+            self.f_m0_phase.setValue(cfg.m0_damper_phase_deg)
+            self.f_m0_delay.setValue(cfg.m0_damper_delay_turns)
+            self.f_m0_hp_alpha.setValue(cfg.m0_damper_hp_alpha)
+            self.f_m0_max_v.setValue(cfg.m0_damper_max_v_kV)
 
             self.chk_hom_align.setChecked(cfg.hom_auto_align)
             self.hom_table.setRowCount(0)
@@ -1389,6 +1426,19 @@ class STABLEMainWindow(QMainWindow):
                 # Open Loop
                 self.chk_pi_enable.setChecked(False)
                 self.chk_dfb_enable.setChecked(False)
+                self.chk_m0_enable.setChecked(False)
+            elif idx == 5:
+                # MAX IV Mode-0 Damper + PI
+                self.chk_pi_enable.setChecked(True)
+                self.f_pi_kp.setValue(0.8)
+                self.f_pi_ki.setValue(1.0e-4)
+                self.chk_dfb_enable.setChecked(False)
+                self.chk_m0_enable.setChecked(True)
+                self.f_m0_gain.setValue(0.20)
+                self.f_m0_phase.setValue(0.0)
+                self.f_m0_delay.setValue(1)
+                self.f_m0_hp_alpha.setValue(0.002)
+                self.f_m0_max_v.setValue(100.0)
         finally:
             self._updating_ui_batch = False
         self._refresh_nyquist_plot()

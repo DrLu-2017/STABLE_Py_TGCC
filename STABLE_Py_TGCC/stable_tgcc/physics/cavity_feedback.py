@@ -80,6 +80,106 @@ def dfb_set(
     }
 
 
+def m0_damper_set(
+    HALF: Dict[str, Any],
+    gain_kV_ps: float = 0.20,
+    phase_deg: float = 0.0,
+    delay_turns: int = 1,
+    hp_alpha: float = 0.002,
+    max_v_kV: float = 100.0,
+) -> Dict[str, Any]:
+    """
+    Initialize MAX IV-style Mode-0 Longitudinal Damper Feedback on the Main Cavity.
+    Measures turn-by-turn barycentric beam arrival time <tau> [ps], removes DC
+    equilibrium offset via a 1-pole high-pass filter, computes the 90-deg
+    synchrotron-quadrature velocity signal (with configurable phase shift), and
+    injects a compensating generator current modulation dI_g into the Main Cavity.
+    """
+    psi = float(HALF["det_angle_mc"])
+    RL = float(HALF["R_mc"])
+    QL = float(HALF["Q_mc"])
+    RoverQ = RL / QL
+    T0 = float(HALF["T0"])
+
+    # Estimate natural synchrotron phase advance per turn (omega_s * T0) for gain normalization
+    v_mc = float(HALF["V_mc"])
+    u0 = float(HALF["U0"])
+    phi_s = float(HALF.get("fais_mc_whc", HALF.get("fais_nat", math.pi - math.asin(min(0.9999, u0 / max(v_mc, 1.0))))))
+    qs_approx = math.sqrt(
+        max(1e-10, (float(HALF["alpha_c"]) / (2.0 * math.pi)) * float(HALF["h"]) * v_mc * abs(math.cos(phi_s)) / float(HALF["E0"]))
+    )
+    omega_s_T0 = max(1e-5, 2.0 * math.pi * qs_approx)
+
+    d_turns = max(1, int(round(delay_turns)))
+    vg2ig_coef = cmath.exp(-1j * psi) / (2.0 * RL * max(1e-6, math.cos(psi)))
+    roq_2pi = 2.0 * math.pi * RoverQ
+
+    return {
+        "enable": True,
+        "gain_kV_ps": float(gain_kV_ps),
+        "phase_rad": math.radians(float(phase_deg)),
+        "delay_turns": d_turns,
+        "hp_alpha": min(0.5, max(1e-5, float(hp_alpha))),
+        "max_v_V": max(1.0, float(max_v_kV)) * 1e3,
+        "omega_s_T0": omega_s_T0,
+        "vg2ig_coef": vg2ig_coef,
+        "roq_2pi": roq_2pi,
+        "T0": T0,
+        "dc_tau_ps": 0.0,
+        "ac_prev_ps": 0.0,
+        "initialized": False,
+        "delay_buf": deque([0.0] * d_turns, maxlen=d_turns),
+        "vg0_m0": 0j,
+        "last_dv_kV": 0.0,
+    }
+
+
+def m0_damper_step(
+    M0: Optional[Dict[str, Any]],
+    tau_bary_ps: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Update Mode-0 Damper state by one turn given the barycentric arrival time `tau_bary_ps` [ps],
+    and compute the delayed Main Cavity generator kick `M0['vg0_m0']`.
+    """
+    if M0 is None or not M0.get("enable", False):
+        return M0
+
+    if not M0["initialized"]:
+        M0["dc_tau_ps"] = float(tau_bary_ps)
+        M0["ac_prev_ps"] = 0.0
+        M0["initialized"] = True
+        M0["vg0_m0"] = 0j
+        return M0
+
+    alpha = M0["hp_alpha"]
+    dc = (1.0 - alpha) * M0["dc_tau_ps"] + alpha * float(tau_bary_ps)
+    M0["dc_tau_ps"] = dc
+    ac = float(tau_bary_ps) - dc
+
+    # Quadrature velocity signal normalized to [ps] amplitude at f_s
+    v_quad = (ac - M0["ac_prev_ps"]) / M0["omega_s_T0"]
+    M0["ac_prev_ps"] = ac
+
+    ph = M0["phase_rad"]
+    sig_ps = v_quad * math.cos(ph) + ac * math.sin(ph)
+    dv_V = M0["gain_kV_ps"] * 1e3 * sig_ps
+    max_v = M0["max_v_V"]
+    if dv_V > max_v:
+        dv_V = max_v
+    elif dv_V < -max_v:
+        dv_V = -max_v
+
+    M0["delay_buf"].appendleft(dv_V)
+    dv_cmd_V = M0["delay_buf"].pop()
+    M0["last_dv_kV"] = dv_cmd_V * 1e-3
+
+    # Convert requested in-phase Main Cavity voltage modulation dV into per-bucket generator kick
+    ig_m0 = dv_cmd_V * M0["vg2ig_coef"]
+    M0["vg0_m0"] = M0["roq_2pi"] * ig_m0
+    return M0
+
+
 def dfb_calc_properties(
     DFB: Dict[str, Any],
     HALF: Dict[str, Any],
@@ -172,9 +272,11 @@ def mc_cavity_control(
     V_load_cpu: np.ndarray,
     TbAng_coef_mc: complex,
     pattern: np.ndarray,
+    M0_DAMPER: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, np.ndarray, complex, np.ndarray, complex, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
-    Exact Python port of MC_Cavity_Control.m with O(1) deque FIFO buffers.
+    Exact Python port of MC_Cavity_Control.m with O(1) deque FIFO buffers,
+    plus optional MAX IV-style Mode-0 Damper Feedback modulation (`M0_DAMPER`).
     """
     n = len(pattern)
     Vg_mc_track = np.zeros(n, dtype=np.complex128)
@@ -185,6 +287,7 @@ def mc_cavity_control(
 
     use_PI = (PI is not None) and ("m" in PI) and bool(PI.get("enable", True))
     use_DFB = (DFB is not None) and ("d" in DFB) and bool(DFB.get("enable", True))
+    vg0_m0 = complex(M0_DAMPER["vg0_m0"]) if (M0_DAMPER is not None and M0_DAMPER.get("enable", False)) else 0j
 
     if use_PI and use_DFB and PI["piIndex"] == 0 and "Vg0_main" in DFB:
         PI["Vg0"] = DFB["Vg0_main"]
@@ -198,7 +301,7 @@ def mc_cavity_control(
             vg0_const = complex(DFB["Vg0_main"])
         else:
             vg0_const = 0j
-        u_gen = np.full(n, vg0_const, dtype=np.complex128)
+        u_gen = np.full(n, vg0_const + vg0_m0, dtype=np.complex128)
         zi = np.array([Vg_mc_track_0 * TbAng_coef_mc], dtype=np.complex128)
         Vg_mc_track, _ = lfilter([1.0], [1.0, -TbAng_coef_mc], u_gen, zi=zi)
         Vg_mc_track_0 = complex(Vg_mc_track[-1])
@@ -307,6 +410,8 @@ def mc_cavity_control(
                 DFB["Vg0"] = cur_vg0_dfb
 
         # 3. Single C-speed lfilter call for generator voltage across all n buckets
+        if vg0_m0 != 0j:
+            u_gen += vg0_m0
         zi = np.array([Vg_mc_track_0 * TbAng_coef_mc], dtype=np.complex128)
         Vg_mc_track, _ = lfilter([1.0], [1.0, -TbAng_coef_mc], u_gen, zi=zi)
         Vg_mc_track_0 = complex(Vg_mc_track[-1])
@@ -395,7 +500,7 @@ def mc_cavity_control(
             vg0_dfb = 0j
 
         # 3. Total generator voltage & cavity voltage at bucket ii
-        Vg_mc_track_0 = Vg_mc_track_0 * TbAng_coef_mc + (vg0_pi + vg0_dfb)
+        Vg_mc_track_0 = Vg_mc_track_0 * TbAng_coef_mc + (vg0_pi + vg0_dfb + vg0_m0)
         Vg_mc_track[ii] = Vg_mc_track_0
         vc_cur = Vg_mc_track_0 + V_load[ii]
         Vc_mc[ii] = vc_cur

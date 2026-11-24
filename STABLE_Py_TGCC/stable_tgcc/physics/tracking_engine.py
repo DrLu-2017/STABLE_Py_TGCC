@@ -24,6 +24,8 @@ from stable_tgcc.physics.machine_init import (
 )
 from stable_tgcc.physics.cavity_feedback import (
     dfb_set,
+    m0_damper_set,
+    m0_damper_step,
     mc_cavity_control,
     voltage_load_calc,
 )
@@ -156,6 +158,19 @@ def run_single_tracking(
         PI["Vg0"] = DFB["Vg0_main"]
     else:
         DFB = None
+
+    M0_DAMPER: Optional[Dict[str, Any]] = (
+        m0_damper_set(
+            HALF,
+            gain_kV_ps=cfg.m0_damper_gain_kV_ps,
+            phase_deg=cfg.m0_damper_phase_deg,
+            delay_turns=cfg.m0_damper_delay_turns,
+            hp_alpha=cfg.m0_damper_hp_alpha,
+            max_v_kV=cfg.m0_damper_max_v_kV,
+        )
+        if cfg.m0_damper_enable
+        else None
+    )
 
     # Initialize macro-particles on GPU/CPU
     q1 = truncated_gaussian(1.0, (-3.0, 3.0), (Par_num, 1))
@@ -367,7 +382,8 @@ def run_single_tracking(
                 sum_mc = sum_re_buf + 1j * sum_im_buf
                 v_load_mc_cpu = sum_mc * Vb_mc_filled
                 Vc_mc_last, _, Vg_mc_track_0, _, V_mc_load_0, PI, DFB = mc_cavity_control(
-                    PI, DFB, HALF["Vrf_ideal"], Vg_mc_track_0, V_mc_load_0, v_load_mc_cpu, TbAng_coef_mc, pattern
+                    PI, DFB, HALF["Vrf_ideal"], Vg_mc_track_0, V_mc_load_0, v_load_mc_cpu, TbAng_coef_mc, pattern,
+                    M0_DAMPER=M0_DAMPER,
                 )
                 vk_mc = (Vc_mc_last[filled_mask] * kick_coef).astype(np.complex64)
                 vr_mc = np.ascontiguousarray(np.real(vk_mc), dtype=np.float32)
@@ -379,7 +395,8 @@ def run_single_tracking(
                     float(HALF["VbImagFactor_mc"]),
                 )
 
-                if turn % Recor_step == 0 and record_th < Recor_num:
+                need_record = turn % Recor_step == 0 and record_th < Recor_num
+                if need_record or (M0_DAMPER is not None):
                     lib.stable_gpu_mean_std(
                         ctx,
                         qm_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
@@ -387,6 +404,10 @@ def run_single_tracking(
                         pm_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
                         ps_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
                     )
+                    if M0_DAMPER is not None:
+                        m0_damper_step(M0_DAMPER, float(np.mean(qm_buf)) * sigma_t0 * 1e12)
+
+                if need_record:
                     record_Q_mean[record_th, :] = qm_buf
                     record_Q_std[record_th, :] = qs_buf
                     record_P_mean[record_th, :] = pm_buf
@@ -463,7 +484,8 @@ def run_single_tracking(
             exp_mc, sum_mc = backend.exp_and_col_sum(exp_ang_coef_mc, Q)
             v_load_mc_cpu = sum_mc * Vb_mc_filled
             Vc_mc_last, _, Vg_mc_track_0, _, V_mc_load_0, PI, DFB = mc_cavity_control(
-                PI, DFB, HALF["Vrf_ideal"], Vg_mc_track_0, V_mc_load_0, v_load_mc_cpu, TbAng_coef_mc, pattern
+                PI, DFB, HALF["Vrf_ideal"], Vg_mc_track_0, V_mc_load_0, v_load_mc_cpu, TbAng_coef_mc, pattern,
+                M0_DAMPER=M0_DAMPER,
             )
 
             # 6. Short-range wake kick
@@ -492,9 +514,13 @@ def run_single_tracking(
                 P, Vc_mc_last[filled_mask] * kick_coef, exp_mc, float(HALF["VbImagFactor_mc"])
             )
 
-            # 8. Record statistics
-            if turn % Recor_step == 0 and record_th < Recor_num:
+            # 8. Record statistics & update Mode-0 Damper
+            need_record = turn % Recor_step == 0 and record_th < Recor_num
+            if need_record or (M0_DAMPER is not None):
                 qm, qs, pm, ps = backend.mean_and_std_cols(Q, P)
+                if M0_DAMPER is not None:
+                    m0_damper_step(M0_DAMPER, float(np.mean(qm)) * sigma_t0 * 1e12)
+            if need_record:
                 record_Q_mean[record_th, :] = qm
                 record_Q_std[record_th, :] = qs
                 record_P_mean[record_th, :] = pm
@@ -538,6 +564,8 @@ def run_single_tracking(
     elapsed_total = time.perf_counter() - t_start
 
     valid_rec = max(1, record_th)
+    fs_approx = float(HALF["Qs0"] / max(HALF["T0"], 1e-12)) if "Qs0" in HALF else 1580.0
+    has_gap = bool(np.any(pattern == 0))
     diag = classify_tracking_result(
         record_Q_mean[:valid_rec, :],
         record_Q_std[:valid_rec, :],
@@ -553,6 +581,8 @@ def run_single_tracking(
         fre_shift_hc=fre_shift_hc,
         Par_num=Par_num,
         has_homs=has_homs,
+        fs_approx=fs_approx,
+        has_gap=has_gap,
     )
 
     final_frame = TelemetryFrame(

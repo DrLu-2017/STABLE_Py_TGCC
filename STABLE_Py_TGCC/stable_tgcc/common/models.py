@@ -97,6 +97,14 @@ class MachineConfig:
     dfb_I2_mA: float = 500.0
     dfb_G2: float = 0.20
 
+    # 6b. Mode-0 Damper Feedback on Main Cavity (MAX IV Method)
+    m0_damper_enable: bool = False
+    m0_damper_gain_kV_ps: float = 0.20
+    m0_damper_phase_deg: float = 0.0
+    m0_damper_delay_turns: int = 1
+    m0_damper_hp_alpha: float = 0.002
+    m0_damper_max_v_kV: float = 100.0
+
     # 7. Higher-Order Modes (HOMs)
     homs: List[HOMMode] = field(default_factory=lambda: [
         HOMMode(Q=830.0, R=6500.0, freq_Hz=1700.0e6),
